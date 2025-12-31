@@ -2,6 +2,11 @@
 
 A PyQt6 desktop app to authenticate with Spotify, pick a scheduled track, and fire playback at the exact time. Built for New Year’s Eve precision with a party-ready UI.
 
+## Screenshots
+![Setup screen](img/Setup.png)
+![Advanced settings](img/Advanced.png)
+![Song selection](img/Music.png)
+
 ## Features
 - Spotify OAuth with a local HTTPS callback (no manual code copy/paste).
 - Setup/Advanced tabs; `.env` is optional and auto-created.
