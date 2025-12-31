@@ -67,4 +67,11 @@ SONG_SCHEDULES = [
         minute=59,
         second=49,
     ),
+    SongSchedule(
+        label="Lynyrd Skynyrd - Free Bird",
+        uri="spotify:track:5EWPGh7jbTNO2wakv8LjUI",
+        hour=23,
+        minute=55,
+        second=5,
+    ),
 ]

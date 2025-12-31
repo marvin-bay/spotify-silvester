@@ -44,6 +44,8 @@ DEFAULT_REDIRECT_URI = "https://127.0.0.1:8888/callback"
 DEFAULT_CERT_PATH = Path(".certs/spotify_localhost.pem")
 DEFAULT_KEY_PATH = Path(".certs/spotify_localhost.key")
 ALBUM_ART_SIZE = 80
+SEARCH_ALBUM_ART_SIZE = 56
+SEARCH_ITEM_HEIGHT = 120
 TEST_PLAY_DELAY_SECONDS = 10
 
 
@@ -378,7 +380,6 @@ class TrackInfoThread(QtCore.QThread):
         if not artists:
             artists = "Unknown artist"
 
-        image_bytes = None
         images = track.get("album", {}).get("images", [])
         return {
             "schedule": schedule,
@@ -386,6 +387,160 @@ class TrackInfoThread(QtCore.QThread):
             "artists": artists,
             "image_url": images[0].get("url") if images else None,
         }
+
+
+class TimeInputDialog(QtWidgets.QDialog):
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Schedule time")
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        hint = QtWidgets.QLabel("Choose the time (HH:MM:SS) for playback.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        form = QtWidgets.QFormLayout()
+        self.hour_input = QtWidgets.QSpinBox()
+        self.hour_input.setRange(0, 23)
+        self.minute_input = QtWidgets.QSpinBox()
+        self.minute_input.setRange(0, 59)
+        self.second_input = QtWidgets.QSpinBox()
+        self.second_input.setRange(0, 59)
+        form.addRow("Hour", self.hour_input)
+        form.addRow("Minute", self.minute_input)
+        form.addRow("Second", self.second_input)
+        layout.addLayout(form)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def time_values(self) -> tuple[int, int, int]:
+        return self.hour_input.value(), self.minute_input.value(), self.second_input.value()
+
+
+class SongSearchDialog(QtWidgets.QDialog):
+    def __init__(self, parent: "MainWindow", client) -> None:
+        super().__init__(parent)
+        self.parent_window = parent
+        self.client = client
+        self.selected_track: dict | None = None
+
+        self.setWindowTitle("Search Spotify")
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        search_row = QtWidgets.QHBoxLayout()
+        self.search_input = QtWidgets.QLineEdit()
+        self.search_input.setPlaceholderText("Search for songs or artists")
+        self.search_button = QtWidgets.QPushButton("Search")
+        self.search_button.clicked.connect(self.perform_search)
+        self.search_input.returnPressed.connect(self.perform_search)
+        search_row.addWidget(self.search_input, 1)
+        search_row.addWidget(self.search_button)
+        layout.addLayout(search_row)
+
+        self.results_list = QtWidgets.QListWidget()
+        self.results_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.results_list.setIconSize(
+            QtCore.QSize(SEARCH_ALBUM_ART_SIZE, SEARCH_ALBUM_ART_SIZE)
+        )
+        self.results_list.setSpacing(6)
+        self.results_list.setUniformItemSizes(False)
+        layout.addWidget(self.results_list, 1)
+
+        self.status_label = QtWidgets.QLabel("")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        buttons = QtWidgets.QDialogButtonBox()
+        self.add_button = QtWidgets.QPushButton("Add selected")
+        self.add_button.setEnabled(False)
+        self.add_button.clicked.connect(self.accept_selection)
+        buttons.addButton(self.add_button, QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole)
+        cancel_button = QtWidgets.QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        buttons.addButton(cancel_button, QtWidgets.QDialogButtonBox.ButtonRole.RejectRole)
+        layout.addWidget(buttons)
+
+        self.results_list.currentItemChanged.connect(self.on_selection_changed)
+
+        self.resize(760, 560)
+
+    def on_selection_changed(self) -> None:
+        self.add_button.setEnabled(self.results_list.currentItem() is not None)
+
+    def perform_search(self) -> None:
+        query = self.search_input.text().strip()
+        if not query:
+            self.status_label.setText("Enter a search term.")
+            return
+
+        self.status_label.setText("Searching...")
+        QtWidgets.QApplication.processEvents()
+        results = self.client.search(q=query, type="track", limit=20)
+        tracks = results.get("tracks", {}).get("items", [])
+        self.populate_results(tracks)
+
+    def populate_results(self, tracks: list[dict]) -> None:
+        self.results_list.clear()
+        if not tracks:
+            self.status_label.setText("No results.")
+            return
+
+        for track in tracks:
+            title = track.get("name", "Unknown track")
+            artists = ", ".join(
+                artist.get("name", "")
+                for artist in track.get("artists", [])
+                if artist.get("name")
+            )
+            if not artists:
+                artists = "Unknown artist"
+            image_url = None
+            images = track.get("album", {}).get("images", [])
+            if images:
+                image_url = images[0].get("url")
+            uri = track.get("uri", "")
+
+            item = QtWidgets.QListWidgetItem()
+            widget, cover_label = self.parent_window.build_track_item_widget(
+                title,
+                f"{artists} • Select to schedule",
+                image_url,
+                cover_size=SEARCH_ALBUM_ART_SIZE,
+            )
+            widget.setMinimumHeight(SEARCH_ITEM_HEIGHT)
+            item.setSizeHint(
+                QtCore.QSize(0, max(SEARCH_ITEM_HEIGHT, SEARCH_ALBUM_ART_SIZE + 32))
+            )
+            item.setData(
+                QtCore.Qt.ItemDataRole.UserRole,
+                {"title": title, "artists": artists, "uri": uri},
+            )
+            self.results_list.addItem(item)
+            self.results_list.setItemWidget(item, widget)
+
+            if image_url:
+                self.parent_window.fetch_cover(image_url, cover_label)
+
+        self.status_label.setText(f"Found {len(tracks)} tracks.")
+
+    def accept_selection(self) -> None:
+        item = self.results_list.currentItem()
+        if item is None:
+            return
+        self.selected_track = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        self.accept()
 
 
 class MainWindow(QtWidgets.QWidget):
@@ -452,9 +607,19 @@ class MainWindow(QtWidgets.QWidget):
         self.stack = QtWidgets.QStackedWidget()
         self.stack.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Preferred,
         )
-        self.root_layout.addWidget(self.stack)
+        self.scroll_area = QtWidgets.QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.scroll_area.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.scroll_area.setWidget(self.stack)
+        self.root_layout.addWidget(self.scroll_area, 1)
 
         self.setup_page = QtWidgets.QWidget()
         self.selection_page = QtWidgets.QWidget()
@@ -611,7 +776,7 @@ class MainWindow(QtWidgets.QWidget):
         self.setup_tabs.addTab(self.advanced_tab, "Advanced")
 
         selection_layout = QtWidgets.QVBoxLayout(self.selection_page)
-        selection_layout.setContentsMargins(0, 0, 0, 0)
+        selection_layout.setContentsMargins(8, 0, 8, 8)
         selection_layout.setSpacing(12)
         selection_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
 
@@ -626,6 +791,19 @@ class MainWindow(QtWidgets.QWidget):
         countdown_font.setBold(True)
         self.countdown_label.setFont(countdown_font)
         selection_layout.addWidget(self.countdown_label)
+
+        search_group = QtWidgets.QGroupBox("Add song from Spotify")
+        search_layout = QtWidgets.QVBoxLayout(search_group)
+        search_hint = QtWidgets.QLabel(
+            "Search Spotify and add a track to songs.py with a scheduled time."
+        )
+        search_hint.setWordWrap(True)
+        search_layout.addWidget(search_hint)
+        self.search_song_button = QtWidgets.QPushButton("Search Spotify")
+        self.search_song_button.setEnabled(False)
+        self.search_song_button.clicked.connect(self.open_song_search)
+        search_layout.addWidget(self.search_song_button)
+        selection_layout.addWidget(search_group)
 
         self.song_list = QtWidgets.QListWidget()
         self.song_list.setEnabled(False)
@@ -783,45 +961,11 @@ class MainWindow(QtWidgets.QWidget):
             else:
                 time_label = schedule_time_label(schedule)
             item = QtWidgets.QListWidgetItem()
-            cover_pixmap = None
-            if info.get("image_bytes"):
-                pixmap = QtGui.QPixmap()
-                if pixmap.loadFromData(info["image_bytes"]):
-                    cover_pixmap = pixmap
-            if cover_pixmap is None and not self.default_cover_pixmap.isNull():
-                cover_pixmap = self.default_cover_pixmap
-
-            widget = QtWidgets.QWidget()
-            widget_layout = QtWidgets.QHBoxLayout(widget)
-            widget_layout.setContentsMargins(8, 6, 8, 6)
-            widget_layout.setSpacing(12)
-
-            cover_label = QtWidgets.QLabel()
-            cover_label.setFixedSize(ALBUM_ART_SIZE, ALBUM_ART_SIZE)
-            cover_label.setObjectName("coverLabel")
-            if cover_pixmap is not None:
-                scaled = cover_pixmap.scaled(
-                    ALBUM_ART_SIZE,
-                    ALBUM_ART_SIZE,
-                    QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    QtCore.Qt.TransformationMode.SmoothTransformation,
-                )
-                cover_label.setPixmap(scaled)
-            widget_layout.addWidget(cover_label)
-
-            text_block = QtWidgets.QVBoxLayout()
-            title_label = QtWidgets.QLabel(title)
-            title_label.setObjectName("songTitle")
-            title_label.setWordWrap(True)
-            text_block.addWidget(title_label)
-
-            meta_label = QtWidgets.QLabel(f"{artists} • {time_label}")
-            meta_label.setObjectName("songMeta")
-            meta_label.setWordWrap(True)
-            text_block.addWidget(meta_label)
-
-            widget_layout.addLayout(text_block, 1)
-
+            widget, cover_label = self.build_track_item_widget(
+                title,
+                f"{artists} • {time_label}",
+                info.get("image_url"),
+            )
             item.setSizeHint(QtCore.QSize(0, ALBUM_ART_SIZE + 16))
             if schedule.label:
                 item.setToolTip(schedule.label)
@@ -845,12 +989,60 @@ class MainWindow(QtWidgets.QWidget):
         self.song_list.setEnabled(True)
         self.schedule_button.setEnabled(True)
 
+    def build_track_item_widget(
+        self,
+        title: str,
+        meta_text: str,
+        image_url: str | None,
+        cover_size: int = ALBUM_ART_SIZE,
+    ) -> tuple[QtWidgets.QWidget, QtWidgets.QLabel]:
+        widget = QtWidgets.QWidget()
+        widget_layout = QtWidgets.QHBoxLayout(widget)
+        widget_layout.setContentsMargins(8, 6, 8, 6)
+        widget_layout.setSpacing(12)
+
+        cover_label = QtWidgets.QLabel()
+        cover_label.setFixedSize(cover_size, cover_size)
+        cover_label.setObjectName("coverLabel")
+
+        cover_pixmap = None
+        if image_url and image_url in self.cover_cache:
+            cover_pixmap = self.cover_cache[image_url]
+        elif not self.default_cover_pixmap.isNull():
+            cover_pixmap = self.default_cover_pixmap
+
+        if cover_pixmap is not None:
+            scaled = cover_pixmap.scaled(
+                cover_size,
+                cover_size,
+                QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                QtCore.Qt.TransformationMode.SmoothTransformation,
+            )
+            cover_label.setPixmap(scaled)
+
+        widget_layout.addWidget(cover_label)
+
+        text_block = QtWidgets.QVBoxLayout()
+        title_label = QtWidgets.QLabel(title)
+        title_label.setObjectName("songTitle")
+        title_label.setWordWrap(True)
+        text_block.addWidget(title_label)
+
+        meta_label = QtWidgets.QLabel(meta_text)
+        meta_label.setObjectName("songMeta")
+        meta_label.setWordWrap(True)
+        text_block.addWidget(meta_label)
+
+        widget_layout.addLayout(text_block, 1)
+        return widget, cover_label
+
     def fetch_cover(self, image_url: str, target_label: QtWidgets.QLabel) -> None:
         cached = self.cover_cache.get(image_url)
         if cached is not None:
+            target_size = target_label.size()
             scaled = cached.scaled(
-                ALBUM_ART_SIZE,
-                ALBUM_ART_SIZE,
+                target_size.width(),
+                target_size.height(),
                 QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 QtCore.Qt.TransformationMode.SmoothTransformation,
             )
@@ -874,9 +1066,10 @@ class MainWindow(QtWidgets.QWidget):
             pixmap = QtGui.QPixmap()
             if pixmap.loadFromData(bytes(data)):
                 self.cover_cache[str(reply.url().toString())] = pixmap
+                target_size = target_label.size()
                 scaled = pixmap.scaled(
-                    ALBUM_ART_SIZE,
-                    ALBUM_ART_SIZE,
+                    target_size.width(),
+                    target_size.height(),
                     QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                     QtCore.Qt.TransformationMode.SmoothTransformation,
                 )
@@ -929,7 +1122,31 @@ class MainWindow(QtWidgets.QWidget):
             target_size = self.basic_window_size
 
         current_page = self.stack.currentWidget()
-        stack_height = current_page.sizeHint().height() if current_page else 0
+        stack_hint = current_page.sizeHint() if current_page else QtCore.QSize()
+        stack_height = stack_hint.height()
+        if stack_height:
+            self.stack.setMinimumHeight(stack_height)
+        content_width = max(
+            self.header.sizeHint().width(),
+            stack_hint.width(),
+            self.status_label.sizeHint().width(),
+            self.footer.sizeHint().width(),
+        )
+        min_button_width = max(
+            [
+                self.open_login_button.sizeHint().width(),
+                self.generate_cert_button.sizeHint().width(),
+                self.save_settings_button.sizeHint().width(),
+                self.submit_code_button.sizeHint().width(),
+                self.search_song_button.sizeHint().width(),
+                self.schedule_button.sizeHint().width(),
+            ]
+        )
+        margins = self.root_layout.contentsMargins()
+        hint_width = max(
+            content_width + margins.left() + margins.right(),
+            min_button_width + margins.left() + margins.right() + 24,
+        )
         hint_height = (
             self.header.sizeHint().height()
             + stack_height
@@ -940,7 +1157,7 @@ class MainWindow(QtWidgets.QWidget):
             + self.root_layout.contentsMargins().bottom()
         )
         desired_height = hint_height
-        desired_width = target_size.width()
+        desired_width = max(target_size.width(), hint_width)
 
         screen = QtWidgets.QApplication.primaryScreen()
         if screen is not None and not self.isFullScreen():
@@ -949,12 +1166,99 @@ class MainWindow(QtWidgets.QWidget):
             max_height = max(400, int(available.height() * 0.8))
             desired_width = min(desired_width, max_width)
             desired_height = min(desired_height, max_height)
-            self.setFixedSize(desired_width, desired_height)
+            self.setMaximumSize(max_width, max_height)
         else:
-            self.resize(desired_width, desired_height)
+            self.setMaximumSize(
+                QtWidgets.QWIDGETSIZE_MAX, QtWidgets.QWIDGETSIZE_MAX
+            )
+
+        self.resize(desired_width, desired_height)
 
     def open_spotify_dashboard(self) -> None:
         webbrowser.open(SPOTIFY_DASHBOARD_URL)
+
+    def open_song_search(self) -> None:
+        if self.client is None:
+            self._show_message(
+                "Not authenticated",
+                "Authenticate with Spotify first, then open the search.",
+            )
+            return
+
+        dialog = SongSearchDialog(self, self.client)
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+
+        track = dialog.selected_track
+        if not track or not track.get("uri"):
+            self._show_message("No selection", "Select a track first.")
+            return
+
+        time_dialog = TimeInputDialog(self)
+        if time_dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        hour, minute, second = time_dialog.time_values()
+
+        title = track.get("title", "Unknown track")
+        artists = track.get("artists", "")
+        label = f"{artists} - {title}" if artists else title
+        try:
+            self.append_song_to_songs_file(label, track["uri"], hour, minute, second)
+        except Exception as exc:
+            self._show_message("Add failed", str(exc))
+            return
+
+        self._show_message(
+            "Song added",
+            f"Added to songs.py at {hour:02d}:{minute:02d}:{second:02d}.",
+        )
+        if self.stack.currentWidget() == self.selection_page:
+            self.load_track_metadata()
+
+    def append_song_to_songs_file(
+        self, label: str, uri: str, hour: int, minute: int, second: int
+    ) -> None:
+        path = ROOT_DIR / "songs.py"
+        text = path.read_text(encoding="utf-8")
+
+        start = text.find("SONG_SCHEDULES")
+        if start == -1:
+            raise RuntimeError("SONG_SCHEDULES not found in songs.py")
+        bracket_start = text.find("[", start)
+        if bracket_start == -1:
+            raise RuntimeError("Song list bracket not found in songs.py")
+
+        depth = 0
+        end_index = None
+        for idx in range(bracket_start, len(text)):
+            char = text[idx]
+            if char == "[":
+                depth += 1
+            elif char == "]":
+                depth -= 1
+                if depth == 0:
+                    end_index = idx
+                    break
+
+        if end_index is None:
+            raise RuntimeError("Song list end not found in songs.py")
+
+        safe_label = label.replace("\\", "\\\\").replace("\"", "\\\"")
+        safe_uri = uri.replace("\\", "\\\\").replace("\"", "\\\"")
+
+        entry = (
+            "    SongSchedule(\n"
+            f"        label=\"{safe_label}\",\n"
+            f"        uri=\"{safe_uri}\",\n"
+            f"        hour={hour},\n"
+            f"        minute={minute},\n"
+            f"        second={second},\n"
+            "    ),\n"
+        )
+
+        insert_at = end_index
+        new_text = text[:insert_at] + entry + text[insert_at:]
+        path.write_text(new_text, encoding="utf-8")
 
     def generate_tls_cert(self) -> None:
         cert_path = resolve_path(self.cert_path_input.text(), DEFAULT_CERT_PATH)
@@ -1123,6 +1427,8 @@ class MainWindow(QtWidgets.QWidget):
     def on_auth_success(self, client) -> None:
         self.client = client
         self.submit_code_button.setEnabled(True)
+        if self.search_song_button is not None:
+            self.search_song_button.setEnabled(True)
         self.stack.setCurrentWidget(self.selection_page)
         self._set_status("Authenticated. Loading songs...")
         self.bring_to_front()
@@ -1322,8 +1628,9 @@ def main() -> int:
             background: #1db954;
             color: #0b0b0b;
             border: none;
-            border-radius: 12px;
-            padding: 8px 14px;
+            border-radius: 18px;
+            padding: 10px 18px;
+            min-height: 36px;
             font-weight: 600;
         }
         QPushButton:disabled {
@@ -1338,7 +1645,6 @@ def main() -> int:
 
     config = load_config()
     window = MainWindow(config, app_icon)
-    window.resize(720, 760)
     window.show()
     return app.exec()
 
